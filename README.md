@@ -1,2 +1,2 @@
 # ansible-doc
-Ansible中文学习笔记~
+Ansible中文学习文档，笔记~
