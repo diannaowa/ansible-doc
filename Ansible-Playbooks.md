@@ -1649,3 +1649,370 @@ Jinja2提供了一个`default`的过滤器，当某个变量未定义的时候�
 
 ## 条件语句 ##
 
+一般情况下，一个任务的结果有可能要依赖一个变量的值，或者是`facts`的信息，或者是一个任务的结果会决定下一个任务是否运行。在一些情况，一个变量的值有可能需要取决于另外一个变量的值。这就需要一些控制语句，来控制ansible的执行流程。
+
+**`when`语句**
+
+有时候需要根据一定的条件在特定的主机节点上跳过执行某些操作，如根据需要发行版来决定安装软件包的方式，或者是跳过某些命令的执行等。
+
+Ansible中`when`语句的简单示例：
+
+	tasks:
+	  - name: "shutdown Debian flavored systems"
+	    command: /sbin/shutdown -t now
+	    when: ansible_os_family == "Debian"
+
+当节点主机的系统为Debian时，执行关机操作。
+
+
+也可以用小括号来确定符合语句的优先级：
+
+	tasks:
+	  - name: "shutdown CentOS 6 and 7 systems"
+	    command: /sbin/shutdown -t now
+	    when: ansible_distribution == "CentOS" and
+	          (ansible_distribution_major_version == "6" or ansible_distribution_major_version == "7")
+
+
+在`when`语句中也可以使用过滤器。如，我们想跳过一个语句执行中的错误，但是后续的任务的执行需要由该任务是否成功执行决定：
+
+	tasks:
+	  - command: /bin/false
+	    register: result
+	    ignore_errors: True
+	  - command: /bin/something
+	    when: result|failed
+	  - command: /bin/something_else
+	    when: result|success
+	  - command: /bin/still/something_else
+	    when: result|skipped
+
+有时候需要将一个字符串的变量转换为整数来进行数字比较：
+
+
+	tasks:
+	  - shell: echo "only on Red Hat 6, derivatives, and later"
+	    when: ansible_os_family == "RedHat" and ansible_lsb.major_release|int >= 6
+
+
+在playbooks和inventory中定义的变量都可以使用，如，需要根据一个变量的bool值决定是否执行该任务：
+
+	vars:
+	  epic: true
+
+条件语句：
+
+	tasks:
+	    - shell: echo "This certainly is epic!"
+	      when: epic
+
+或：
+
+	tasks:
+	    - shell: echo "This certainly isn't epic!"
+	      when: not epic
+
+如果引用的变量没有被定义，使用Jinja2的`defined`测试，可以跳过或者是抛出错误：
+
+	tasks:
+	    - shell: echo "I've got '{{ foo }}' and am not afraid to use it!"
+	      when: foo is defined
+	
+	    - fail: msg="Bailing out. this play requires 'bar'"
+	      when: bar is not defined
+
+当`when`和`with_items`一起使用的时候，每个项都会单独被`when`语句处理：
+
+	tasks:
+	    - command: echo {{ item }}
+	      with_items: [ 0, 2, 4, 6, 8, 10 ]
+	      when: item > 5
+
+示例：
+
+	[root@web1 ~]# cat /etc/ansible/when.yml
+	---
+	- hosts: webservers
+	  remote_user: root
+	  tasks:
+	   - command: echo {{ item }}
+	     with_items: [ 1,2,3,4,5,6,8,10]
+	     when: item > 5
+
+	[root@web1 ~]# ansible-playbook /etc/ansible/when.yml
+	
+	PLAY [webservers] ************************************************************* 
+	
+	GATHERING FACTS *************************************************************** 
+	ok: [192.168.1.65]
+	
+	TASK: [command echo {{ item }}] *********************************************** 
+	skipping: [192.168.1.65] => (item=1)
+	skipping: [192.168.1.65] => (item=2)
+	skipping: [192.168.1.65] => (item=3)
+	skipping: [192.168.1.65] => (item=4)
+	skipping: [192.168.1.65] => (item=5)
+	changed: [192.168.1.65] => (item=6)
+	changed: [192.168.1.65] => (item=8)
+	changed: [192.168.1.65] => (item=10)
+	
+	PLAY RECAP ******************************************************************** 
+	192.168.1.65               : ok=2    changed=1    unreachable=0    failed=0
+
+
+**加载自定义facts**
+
+如果需要的话，也可以返回自定义的facts给控制节点。返回的自定义的facts变量也可以用作下个任务的执行条件：
+
+	tasks:
+	    - name: gather site specific fact data
+	      action: site_facts
+	    - command: /usr/bin/thingy
+	      when: my_custom_fact_just_retrieved_from_the_remote_system == '1234'
+
+**在角色和包含中使用`when`**
+
+
+如果有多个任务都需要使用同一个条件语句控制。可以将这些任务打包到一个单独的任务文件中，然后使用`include`包含和`when`条件语句。条件语句只对包含任务文件起作用，对包含playbook文件不起作用。指定的条件语句会作用到所包含的每个任务上：
+
+	- include: tasks/sometasks.yml
+	  when: "'reticulating splines' in output"
+
+角色中使用`when`:
+
+	- hosts: webservers
+	  roles:
+	     - { role: debian_stock_config, when: ansible_os_family == 'Debian' }
+
+
+**注册变量**
+
+在playbook中奖某个命令运行的结果保存起来，提供给后续任务使用。如，通过command模块来判断远程节点上某个文件是否存在或者通过执行某个命令的获取其返回结果，并保存起来，下个任务根据获取的变量值来决定执行的具体操作。
+
+`register`关键字可以将任务执行结果保存到一个变量中，该变量可以在模板或者playbooks文件中使用：
+
+
+	- name: test play
+	  hosts: all
+	
+	  tasks:
+	
+	      - shell: cat /etc/motd
+	        register: motd_contents
+	
+	      - shell: echo "motd contains the word hi"
+	        when: motd_contents.stdout.find('hi') != -1
+
+上边中的例子中，通过注册变量访问返回的内容，`stdout`里面保存了命令的标准输出内容。注册变量还可以使用在`with_items`中，如果其保存的内容可以转换为列表，或者内容本身就是个列表。如果命令的输出本身就是列表，可以通过`stdout_lines`访问：
+
+	- name: registered variable usage as a with_items list
+	  hosts: all
+	
+	  tasks:
+	
+	      - name: retrieve the list of home directories
+	        command: ls /home
+	        register: home_dirs
+	
+	      - name: add home dirs to the backup spooler
+	        file: path=/mnt/bkspool/{{ item }} src=/home/{{ item }} state=link
+	        with_items: home_dirs.stdout_lines
+	        # same as with_items: home_dirs.stdout.split()
+
+示例：
+
+	[root@web1 ~]# cat /etc/ansible/rewith.yml
+	---
+	- hosts: webservers
+	  remote_user: root
+	  tasks:
+	   - name: list of home dir
+	     command: ls /home
+	     register: home_dirs
+	   - name: add home dirs to the backup
+	     file: path=/tmp/back/{{ item }} src=/home/{{ item }} state=link
+	     with_items: home_dirs.stdout_lines
+
+	[root@web1 ~]# ansible-playbook /etc/ansible/rewith.yml
+	
+	PLAY [webservers] ************************************************************* 
+	
+	GATHERING FACTS *************************************************************** 
+	ok: [192.168.1.65]
+	
+	TASK: [list of home dir] ****************************************************** 
+	changed: [192.168.1.65]
+	
+	TASK: [add home dirs to the backup] ******************************************* 
+	changed: [192.168.1.65] => (item=1.sql)
+	changed: [192.168.1.65] => (item=1youku.sql)
+	changed: [192.168.1.65] => (item=liuzhenwei)
+	changed: [192.168.1.65] => (item=tom)
+	
+	PLAY RECAP ******************************************************************** 
+	192.168.1.65               : ok=3    changed=2    unreachable=0    failed=0 
+
+	###远程节点
+	[root@db2 ~]# ll /tmp/back
+	total 0
+	lrwxrwxrwx. 1 root root 11 Aug  4 14:37 1.sql -> /home/1.sql
+	lrwxrwxrwx. 1 root root 16 Aug  4 14:37 1youku.sql -> /home/1youku.sql
+	lrwxrwxrwx. 1 root root 16 Aug  4 14:37 liuzhenwei -> /home/liuzhenwei
+	lrwxrwxrwx. 1 root root  9 Aug  4 14:37 tom -> /home/tom
+
+
+[该部分内容官方文档](http://docs.ansible.com/ansible/playbooks_conditionals.html)
+
+
+## Loops ##
+
+`with_items`
+
+**标准循环**
+
+循环的添加几个用户：
+
+	- name: add several users
+	  user: name={{ item }} state=present groups=wheel
+	  with_items:
+	     - testuser1
+	     - testuser2
+
+如果再事先已经定义好了一个列表变量：
+
+	with_items: "{{somelist}}"
+
+
+上边的循环语句执行方式与下边的任务执行结果相同：
+
+	- name: add user testuser1
+	  user: name=testuser1 state=present groups=wheel
+	- name: add user testuser2
+	  user: name=testuser2 state=present groups=wheel
+
+
+使用`with_items`迭代循环的变量可以是个单纯的列表，也可以是一个包含字典的列表：
+
+	- name: add several users
+	  user: name={{ item.name }} state=present groups={{ item.groups }}
+	  with_items:
+	    - { name: 'testuser1', groups: 'wheel' }
+	    - { name: 'testuser2', groups: 'root' }
+
+**嵌套循环**
+
+	- name: give users access to multiple databases
+	  mysql_user: name={{ item[0] }} priv={{ item[1] }}.*:ALL append_privs=yes password=foo
+	  with_nested:
+	    - [ 'alice', 'bob' ]
+	    - [ 'clientdb', 'employeedb', 'providerdb' ]
+
+item[0]是循环的第一个列表的值['alice','bob']。item[1]是第二个列表的值。表示循环创建alice和bob两个用户，并且为其赋予在三个数据库上的所有权限。
+
+也可以将用户列表事先赋值给一个变量：
+
+	- name: here, 'users' contains the above list of employees
+	  mysql_user: name={{ item[0] }} priv={{ item[1] }}.*:ALL append_privs=yes password=foo
+	  with_nested:
+	    - "{{users}}"
+	    - [ 'clientdb', 'employeedb', 'providerdb' ]
+
+
+**遍历Hashes**
+
+如，有以下变量数据：
+
+	---
+	users:
+	  alice:
+	    name: Alice Appleworth
+	    telephone: 123-456-7890
+	  bob:
+	    name: Bob Bananarama
+	    telephone: 987-654-3210
+
+现在需要输出每个用户的用户名和手机号。使用`with_dict`:
+
+	tasks:
+	  - name: Print phone records
+	    debug: msg="User {{ item.key }} is {{ item.value.name }} ({{ item.value.telephone }})"
+	    with_dict: "{{users}}"
+
+**文件匹配遍历**
+
+`with_fileglob`匹配单个目录下所有文件。
+
+	---
+	- hosts: all
+	
+	  tasks:
+	
+	    # first ensure our target directory exists
+	    - file: dest=/etc/fooapp state=directory
+	
+	    # copy each file over that matches the given pattern
+	    - copy: src={{ item }} dest=/etc/fooapp/ owner=root mode=600
+	      with_fileglob:
+	        - /playbooks/files/fooapp/*
+
+注：在角色中以相对路径使用`with_fileglob`,ansible会将路径解析为`role/<rolename>/files`。
+
+**遍历数据并行集合**
+
+
+	[root@web1 ~]# cat /etc/ansible/loop.yml
+	---
+	- hosts: webservers
+	  remote_user: root
+	  vars:
+	    alpha: [ 'a','b','c','d']
+	    numbers: [ 1,2,3,4 ]
+	  tasks:
+	    - debug: msg="{{ item.0 }} and {{ item.1 }}"
+	      with_together:
+	         - "{{ alpha }}"
+	         - "{{ numbers }}"
+
+	[root@web1 ~]# ansible-playbook /etc/ansible/loop.yml
+	
+	PLAY [webservers] ************************************************************* 
+	
+	GATHERING FACTS *************************************************************** 
+	ok: [192.168.1.65]
+	
+	TASK: [debug msg="{{ item.0 }} and {{ item.1 }}"] ***************************** 
+	ok: [192.168.1.65] => (item=['a', 1]) => {
+	    "item": [
+	        "a", 
+	        1
+	    ], 
+	    "msg": "a and 1"
+	}
+	ok: [192.168.1.65] => (item=['b', 2]) => {
+	    "item": [
+	        "b", 
+	        2
+	    ], 
+	    "msg": "b and 2"
+	}
+	ok: [192.168.1.65] => (item=['c', 3]) => {
+	    "item": [
+	        "c", 
+	        3
+	    ], 
+	    "msg": "c and 3"
+	}
+	ok: [192.168.1.65] => (item=['d', 4]) => {
+	    "item": [
+	        "d", 
+	        4
+	    ], 
+	    "msg": "d and 4"
+	}
+	
+	PLAY RECAP ******************************************************************** 
+	192.168.1.65               : ok=2    changed=0    unreachable=0    failed=0
+
+
+**遍历子元素**
+
