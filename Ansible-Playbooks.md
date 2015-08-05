@@ -2116,7 +2116,7 @@ playbooks中定义如下：
 	  retries: 5
 	  delay: 10
 
-上边的例子重复执行shell模块，当标准输出中"all systems go"不等于-1的时候停止执行。重试5次，延迟时间10秒。`retries`默认值为3，`delay`默认值为5。
+上边的例子重复执行shell模块，当标准输出中包含"all systems go"的时候停止执行。重试5次，延迟时间10秒。`retries`默认值为3，`delay`默认值为5。
 
 任务的返回值为最后一次循环的返回结果。
 
