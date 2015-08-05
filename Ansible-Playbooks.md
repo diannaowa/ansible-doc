@@ -1787,7 +1787,7 @@ Ansible中`when`语句的简单示例：
 
 **注册变量**
 
-在playbook中奖某个命令运行的结果保存起来，提供给后续任务使用。如，通过command模块来判断远程节点上某个文件是否存在或者通过执行某个命令的获取其返回结果，并保存起来，下个任务根据获取的变量值来决定执行的具体操作。
+在playbook中将某个命令运行的结果保存起来，提供给后续任务使用。如，通过command模块来判断远程节点上某个文件是否存在或者通过执行某个命令的获取其返回结果，并保存起来，下个任务根据获取的变量值来决定执行的具体操作。
 
 `register`关键字可以将任务执行结果保存到一个变量中，该变量可以在模板或者playbooks文件中使用：
 
@@ -2015,4 +2015,331 @@ item[0]是循环的第一个列表的值['alice','bob']。item[1]是第二个列
 
 
 **遍历子元素**
+
+假如现在需要遍历一个用户列表，并创建每个用户，而且还需要为每个用户配置以特定的SSH key登录。变量文件内容如下：
+
+	---
+	users:
+	  - name: alice
+	    authorized:
+	      - /tmp/alice/onekey.pub
+	      - /tmp/alice/twokey.pub
+	    mysql:
+	        password: mysql-password
+	        hosts:
+	          - "%"
+	          - "127.0.0.1"
+	          - "::1"
+	          - "localhost"
+	        privs:
+	          - "*.*:SELECT"
+	          - "DB1.*:ALL"
+	  - name: bob
+	    authorized:
+	      - /tmp/bob/id_rsa.pub
+	    mysql:
+	        password: other-mysql-password
+	        hosts:
+	          - "db1"
+	        privs:
+	          - "*.*:SELECT"
+	          - "DB2.*:ALL"
+
+
+playbooks中定义如下：
+
+	- user: name={{ item.name }} state=present generate_ssh_key=yes
+	  with_items: "{{users}}"
+	
+	- authorized_key: "user={{ item.0.name }} key='{{ lookup('file', item.1) }}'"
+	  with_subelements:
+	     - users
+	     - authorized
+
+也可以遍历嵌套的子列表：
+
+	- name: Setup MySQL users
+	  mysql_user: name={{ item.0.user }} password={{ item.0.mysql.password }} host={{ item.1 }} priv={{ item.0.mysql.privs | join('/') }}
+	  with_subelements:
+	    - users
+	    - mysql.hosts
+
+**循环整数序列**
+
+`with_sequence`可以生成一个自增的整数序列，可以指定起始值和结束值，也可以指定增长步长。
+
+参数以`key=value`的形式指定，`format`指定输出的格式。
+
+数字可以是十进制，十六进制，八进制。
+
+
+	---
+	- hosts: all
+	
+	  tasks:
+	
+	    # create groups
+	    - group: name=evens state=present
+	    - group: name=odds state=present
+	
+	    # create some test users
+	    - user: name={{ item }} state=present groups=evens
+	      with_sequence: start=0 end=32 format=testuser%02x
+	
+	    # create a series of directories with even numbers for some reason
+	    - file: dest=/var/stuff/{{ item }} state=directory
+	      with_sequence: start=4 end=16 stride=2
+	
+	    # a simpler way to use the sequence plugin
+	    # create 4 groups
+	    - group: name=group{{ item }} state=present
+	      with_sequence: count=4
+
+
+**随机选择**
+
+`random_choice`可以从列表中随机取一个值。
+
+	- debug: msg={{ item }}
+	  with_random_choice:
+	     - "go through the door"
+	     - "drink from the goblet"
+	     - "press the red button"
+	     - "do nothing"
+
+
+**Do-Until 循环**
+
+	- action: shell /usr/bin/foo
+	  register: result
+	  until: result.stdout.find("all systems go") != -1
+	  retries: 5
+	  delay: 10
+
+上边的例子重复执行shell模块，当标准输出中"all systems go"不等于-1的时候停止执行。重试5次，延迟时间10秒。`retries`默认值为3，`delay`默认值为5。
+
+任务的返回值为最后一次循环的返回结果。
+
+
+**循环注册变量**
+
+在循环中使用`register`时，索保存的结果中包含`results`关键字，该关键字保存模块执行结果的列表
+
+	- shell: echo "{{ item }}"
+	  with_items:
+	    - one
+	    - two
+	  register: echo
+
+变量echo内容如下：
+
+	{
+	    "changed": true,
+	    "msg": "All items completed",
+	    "results": [
+	        {
+	            "changed": true,
+	            "cmd": "echo \"one\" ",
+	            "delta": "0:00:00.003110",
+	            "end": "2013-12-19 12:00:05.187153",
+	            "invocation": {
+	                "module_args": "echo \"one\"",
+	                "module_name": "shell"
+	            },
+	            "item": "one",
+	            "rc": 0,
+	            "start": "2013-12-19 12:00:05.184043",
+	            "stderr": "",
+	            "stdout": "one"
+	        },
+	        {
+	            "changed": true,
+	            "cmd": "echo \"two\" ",
+	            "delta": "0:00:00.002920",
+	            "end": "2013-12-19 12:00:05.245502",
+	            "invocation": {
+	                "module_args": "echo \"two\"",
+	                "module_name": "shell"
+	            },
+	            "item": "two",
+	            "rc": 0,
+	            "start": "2013-12-19 12:00:05.242582",
+	            "stderr": "",
+	            "stdout": "two"
+	        }
+	    ]
+	}
+
+遍历注册变量的结果：
+
+	- name: Fail if return code is not 0
+	  fail:
+	    msg: "The command ({{ item.cmd }}) did not have a 0 return code"
+	  when: item.rc != 0
+	  with_items: "{{echo.results}}"
+
+示例：
+
+	[root@web1 ~]# cat /etc/ansible/reloop.yml
+	---
+	- hosts: webservers
+	  remote_user: root
+	  tasks:
+	   - shell: echo "{{ item }}"
+	     with_items:
+	      - one
+	      - two
+	     register: echo
+	   - debug: msg="{{ echo }}"
+	   - name: Fail if return code is not 0
+	     fail: msg=" The command {{ item.cmd }} has a 0 return code"
+	     when: item.rc != 0
+	     with_items: "{{ echo.results }}"
+
+
+	[root@web1 ~]# ansible-playbook /etc/ansible/reloop.yml
+	
+	PLAY [webservers] ************************************************************* 
+	
+	GATHERING FACTS *************************************************************** 
+	ok: [192.168.1.65]
+	
+	TASK: [shell echo "{{ item }}"] *********************************************** 
+	changed: [192.168.1.65] => (item=one)
+	changed: [192.168.1.65] => (item=two)
+	
+	TASK: [debug msg="{{ echo }}"] ************************************************ 
+	ok: [192.168.1.65] => {
+	    "msg": "{'msg': 'All items completed', 'changed': True, 'results': [{u'stdout': u'one', u'changed': True, u'end': u'2015-08-05 11:30:42.560652', u'start': u'2015-08-05 11:30:42.549056', u'cmd': u'echo \"one\"', u'rc': 0, 'item': 'one', u'stderr': u'', u'delta': u'0:00:00.011596', 'invocation': {'module_name': u'shell', 'module_args': u'echo \"one\"'}, 'stdout_lines': [u'one'], u'warnings': []}, {u'stdout': u'two', u'changed': True, u'end': u'2015-08-05 11:30:44.105387', u'start': u'2015-08-05 11:30:44.093500', u'cmd': u'echo \"two\"', u'rc': 0, 'item': 'two', u'stderr': u'', u'delta': u'0:00:00.011887', 'invocation': {'module_name': u'shell', 'module_args': u'echo \"two\"'}, 'stdout_lines': [u'two'], u'warnings': []}]}"
+	}
+	
+	TASK: [Fail if return code is not 0] ****************************************** 
+	skipping: [192.168.1.65] => (item={u'cmd': u'echo "one"', u'end': u'2015-08-05 11:30:42.560652', u'stderr': u'', u'stdout': u'one', u'changed': True, u'rc': 0, 'item': 'one', u'warnings': [], u'delta': u'0:00:00.011596', 'invocation': {'module_name': u'shell', 'module_args': u'echo "one"'}, 'stdout_lines': [u'one'], u'start': u'2015-08-05 11:30:42.549056'})
+	skipping: [192.168.1.65] => (item={u'cmd': u'echo "two"', u'end': u'2015-08-05 11:30:44.105387', u'stderr': u'', u'stdout': u'two', u'changed': True, u'rc': 0, 'item': 'two', u'warnings': [], u'delta': u'0:00:00.011887', 'invocation': {'module_name': u'shell', 'module_args': u'echo "two"'}, 'stdout_lines': [u'two'], u'start': u'2015-08-05 11:30:44.093500'})
+	
+	PLAY RECAP ******************************************************************** 
+	192.168.1.65               : ok=4    changed=1    unreachable=0    failed=0
+
+[该部分内容官方文档](http://docs.ansible.com/ansible/playbooks_loops.html)
+
+
+## 最佳实践 ##
+
+
+**目录布局**
+
+目录和文件结构：
+
+	production                # 生产环境的inventory文件
+	staging                   # 测试环境的inventory文件
+	
+	group_vars/
+	   group1                 # 为主机组定义的变量
+	   group2                 # ""
+	host_vars/
+	   hostname1              # 主机变量
+	   hostname2              # ""
+	
+	library/                  # 自定义的模块（可选）
+	filter_plugins/           # 自定义的过滤器插件(可选)
+	
+	site.yml                  # 主playbooks
+	webservers.yml            # webservers组的playbooks文件
+	dbservers.yml             # dbserver的playbooks
+	
+	roles/
+	    common/               # 角色，common下可以包含一些角色通用的操作
+	        tasks/            #
+	            main.yml      #  <-- 任务文件，也可以包含其他的任务文件
+	        handlers/         #
+	            main.yml      #  <-- handlers file
+	        templates/        #  <-- 模板文件目录
+	            ntp.conf.j2   #  <------- 模板文件以j2结尾
+	        files/            #
+	            bar.txt       #  <-- 用来复制的源文件
+	            foo.sh        #  <-- 脚本文件
+	        vars/             #
+	            main.yml      #  <-- 该角色的变量文件，也可以包含其他变量文件
+	        defaults/         #
+	            main.yml      #  <-- 该角色的默认变量文件，优先级最低
+	        meta/             #
+	            main.yml      #  <-- 角色依赖关系
+	
+	    webtier/              # 另一个角色名称
+	    monitoring/           # ""
+	    fooapp/               # ""
+
+
+**如何区分测试和生产环境**
+
+在使用静态inventory文件的时候，要注意将不同环境内的主机区分开。为主机定义组名的时候，要做到见名知义.
+
+	# file: production
+	
+	[atlanta-webservers]
+	www-atl-1.example.com
+	www-atl-2.example.com
+	
+	[boston-webservers]
+	www-bos-1.example.com
+	www-bos-2.example.com
+	
+	[atlanta-dbservers]
+	db-atl-1.example.com
+	db-atl-2.example.com
+	
+	[boston-dbservers]
+	db-bos-1.example.com
+	
+	# webservers in all geos
+	[webservers:children]
+	atlanta-webservers
+	boston-webservers
+	
+	# dbservers in all geos
+	[dbservers:children]
+	atlanta-dbservers
+	boston-dbservers
+	
+	# everything in the atlanta geo
+	[atlanta:children]
+	atlanta-webservers
+	atlanta-dbservers
+	
+	# everything in the boston geo
+	[boston:children]
+	boston-webservers
+	boston-dbservers
+
+**组和主机变量**
+
+有时候只是使用组来组织主机也是不够的。可以将某些主机赋值给变量，如`atlanta`组有它自己的NTP服务器，当设置ntp.conf的时候，就可以使用这些变量了。
+
+	---
+	# file: group_vars/atlanta
+	ntp: ntp-atlanta.example.com
+	backup: backup-atlanta.example.com
+
+还可以是以下的方式定义组变量：
+
+	---
+	# file: group_vars/webservers
+	apacheMaxRequestsPerChild: 3000
+	apacheMaxClients: 900
+
+如果有些值是默认值或者是较为通用的，可以定义在`group_vars/all`文件内：
+
+	---
+	# file: group_vars/all
+	ntp: ntp-boston.example.com
+	backup: backup-boston.example.com
+
+也可以在`host_vars`目录下为某个主机定义特定的变量，但是一般不建议这么做，除非是非常必要：
+
+	---
+	# file: host_vars/db-bos-1.example.com
+	foo_agent_port: 86
+	bar_agent_port: 99
+
+[该部分官方文档](http://docs.ansible.com/ansible/playbooks_best_practices.html)
 
